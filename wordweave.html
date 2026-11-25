@@ -283,6 +283,7 @@ mark.tg:hover{background:rgba(255,215,94,.35)}
         <h1>WordWeave<span>语境词文</span></h1>
         <div class="topBtns">
           <button class="ghost" id="btnNotice" title="查看使用须知">📄 须知</button>
+          <button class="ghost" id="btnChangelog" title="查看本次更新内容">🆕 更新日志</button>
           <button class="ghost" id="btnBackup" title="备份与恢复">⤓ 备份</button>
           <button class="ghost" id="btnTheme" title="切换明暗主题">☀︎ 亮色</button>
           <button class="ghost" id="btnCfg">⚙︎ 模型设置</button>
@@ -402,6 +403,7 @@ mark.tg:hover{background:rgba(255,215,94,.35)}
         <div class="mobileSettingsActions">
           <button type="button" id="mobileThemeAction"><b>☼　外观</b><span>切换浅色或深色阅读界面</span></button>
           <button type="button" id="mobileNoticeAction"><b>▤　使用须知</b><span>查看使用说明与费用提示</span></button>
+          <button type="button" id="mobileChangelogAction"><b>🆕　更新日志</b><span>查看最近一次更新的功能</span></button>
           <button type="button" id="mobileCfgAction"><b>⚙　模型与 API</b><span>配置服务商、Key 与生成超时</span></button>
           <button type="button" id="mobileBackupAction"><b>⤓　备份与恢复</b><span>换浏览器或换手机时搬移全部数据</span></button>
         </div>
@@ -516,6 +518,15 @@ mark.tg:hover{background:rgba(255,215,94,.35)}
   </div>
 </div>
 
+<!-- 更新日志弹窗（与使用须知分开） -->
+<div class="overlay" id="ovChangelog">
+  <div class="modal">
+    <h3 id="changelogTitle">更新日志</h3>
+    <div class="tip" id="changelogMeta"></div>
+    <div class="noticeBody" id="changelogBody"></div>
+    <div class="acts"><button class="primary2" id="btnChangelogOk">知道了</button></div>
+  </div>
+</div>
 <!-- 使用须知弹窗 -->
 <div class="overlay" id="ovNotice">
   <div class="modal">
@@ -1908,9 +1919,48 @@ function openNotice(){
 $('#btnNoticeOk').onclick=()=>{
   $('#ovNotice').classList.remove('on');
   if(noticeData) LS.set('ww.noticeHash',noticeHash(noticeData));
-  if(!cfg.key) setTimeout(openCfg,300);
+  // 须知关掉后再看是否需要弹更新日志，避免两个弹窗叠在一起
+  maybeOpenChangelog().then(shown=>{ if(!shown && !cfg.key) setTimeout(openCfg,300); });
 };
 $('#btnNotice').onclick=async()=>{ if(!noticeData) await loadNotice(); openNotice(); };
+/* ---------------- 更新日志：与使用须知完全分开的两个文档 ---------------- */
+const CHANGELOG_SRC='changelog.js';
+const CHANGELOG_DEFAULT={version:'2026-11-25',title:'更新日志 · 完成阅读与到期复习',updated:'2026-11-25',text:'## 一、本次新增\n- **完成阅读**：文章读完后，在文末点「完成阅读」，记录完成时间，并记下正文里实际出现的目标词\n- **已学习的词不再重复抽取**：完成过的词标记为「已学习」，下一篇不再当新词抽到\n\n## 二、复习计划\n- 完成阅读后自动安排复习，间隔为第 1、3、7、14、30 天\n- 统计页新增「今日待复习」，到期文章排在最前面，点一下即可打开\n- 文章底部可选择「记得 / 有点模糊 / 忘记了」，据此调整下次间隔\n- 复习是站内提醒，网页关闭时不会推送通知\n\n## 三、其他改动\n- 历史记录不再限制 40 篇\n- 文章列表显示「已读 / 待复习 / 已复习」'}
+let changelogData=null;
+function loadChangelog(){
+  return new Promise(resolve=>{
+    window.WW_CHANGELOG=null;
+    const s=document.createElement('script');
+    s.src=CHANGELOG_SRC+(location.protocol==='file:'?'':'?t='+Date.now());
+    s.onload=()=>{ const d=window.WW_CHANGELOG; changelogData=(d&&d.text)?d:CHANGELOG_DEFAULT; resolve(changelogData); };
+    s.onerror=()=>{ changelogData=CHANGELOG_DEFAULT; resolve(changelogData); };
+    document.head.appendChild(s);
+  });
+}
+function openChangelog(){
+  const d=changelogData||CHANGELOG_DEFAULT;
+  $('#changelogTitle').textContent=d.title||'更新日志';
+  $('#changelogMeta').textContent=d.updated?('更新于 '+d.updated):'';
+  $('#changelogBody').innerHTML=mdLite(d.text);
+  $('#changelogBody').scrollTop=0;
+  $('#ovChangelog').classList.add('on');
+}
+function markChangelogRead(){
+  if(changelogData) LS.set('ww.changelogHash',noticeHash(changelogData));
+}
+function maybeOpenChangelog(){
+  return loadChangelog().then(d=>{
+    if(LS.get('ww.changelogHash','')===noticeHash(d)) return false;
+    openChangelog(); return true;
+  });
+}
+$('#btnChangelogOk').onclick=()=>{
+  $('#ovChangelog').classList.remove('on');
+  markChangelogRead();
+  if(!cfg.key) setTimeout(openCfg,300);
+};
+$('#btnChangelog').onclick=async()=>{ if(!changelogData) await loadChangelog(); openChangelog(); markChangelogRead(); };
+$('#mobileChangelogAction').onclick=async()=>{ if(!changelogData) await loadChangelog(); openChangelog(); markChangelogRead(); };
 
 /* ===================================================================
    主题
@@ -2110,7 +2160,8 @@ if(current){ render(current); $('#words').value=(current.words||[]).join('\n'); 
 loadNotice().then(d=>{
   // 按内容哈希比对：你改了正文，用户下次打开就会重新看到
   if(LS.get('ww.noticeHash','')!==noticeHash(d)) return openNotice();
-  if(!cfg.key) setTimeout(openCfg,400);
+  // 须知已读：再看更新日志是不是新版，是就自动弹一次
+  maybeOpenChangelog().then(shown=>{ if(!shown && !cfg.key) setTimeout(openCfg,400); });
 });
 </script>
 </body>
