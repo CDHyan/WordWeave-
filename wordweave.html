@@ -146,6 +146,18 @@ mark.tg:hover{background:rgba(255,215,94,.35)}
 .vocabItem .vs{color:var(--mut);font-size:11px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .statRow{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line);font-size:13.5px}
 .statRow:last-child{border-bottom:0}
+.reviewQueue{padding:14px;margin-bottom:16px;border:1px solid var(--line);border-radius:14px;background:var(--panel2)}
+.reviewQueueHead{display:flex;justify-content:space-between;align-items:center;font-size:14px}
+.reviewQueueHead span{display:inline-block;min-width:48px;text-align:right;color:var(--acc2);font-weight:700}
+#dueReviews{display:grid;gap:8px;margin-top:10px}
+.dueReview{display:flex;justify-content:space-between;gap:12px;text-align:left;min-height:48px;background:var(--panel)}
+.dueReview span,.reviewGuide{font-size:12px;color:var(--mut)}
+.reviewGuide{line-height:1.6;margin-top:12px}
+.statsList{margin-top:14px}
+.readDoneBar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.readDoneBar>div:first-child{flex:1;min-width:180px}
+.reviewActions{display:flex;gap:7px;flex-wrap:wrap}
+
 .statNum{color:var(--acc2);font-weight:600}
 /* ---------- 弹窗 ---------- */
 .overlay{position:fixed;inset:0;background:rgba(0,0,0,.62);display:none;align-items:center;justify-content:center;padding:16px;z-index:50;backdrop-filter:blur(4px)}
@@ -307,6 +319,9 @@ mark.tg:hover{background:rgba(255,215,94,.35)}
           <div class="catCard" data-cat="culture"><span class="ico">🌏</span>文化</div>
         </div>
 
+        <label>生成词书</label>
+        <select id="genVocabBook" style="font-size:14px"></select>
+
         <label>文章长度（词）</label>
         <div class="sliderRow">
           <input type="range" id="lenRange" min="100" max="1000" step="50" value="250">
@@ -354,6 +369,16 @@ mark.tg:hover{background:rgba(255,215,94,.35)}
 
       <!-- 生词本 -->
       <div class="pane" id="paneVocab">
+         <div class="row" style="align-items:center">
+           <select id="vocabBook" style="flex:1;font-size:14px"></select>
+           <button class="sm" id="btnBookNew" type="button">＋新词书</button>
+           <button class="sm" id="btnBookRename" type="button">重命名</button>
+         </div>
+         <div class="row" style="margin-top:8px">
+           <input type="file" id="vocabImportFile" accept=".txt,.csv,text/plain,text/csv" style="display:none">
+           <button class="ghost" id="btnVocabImport" type="button" style="flex:1">导入 TXT / CSV</button>
+           <button class="sm" id="btnBookDelete" type="button">删除词书</button>
+         </div>
         <div class="row">
           <input id="addWord" placeholder="单词" autocapitalize="none" autocorrect="off" style="font-size:14px">
           <input id="addMeaning" placeholder="中文义（可空）" style="font-size:14px">
@@ -554,7 +579,19 @@ const LS = {
 let cfg      = Object.assign({preset:'deepseek', base:PRESETS.deepseek.base, key:'', model:PRESETS.deepseek.model, timeoutGen:''}, LS.get('ww.cfg',{}));
 let history  = LS.get('ww.history', []);
 let current  = LS.get('ww.current', null);
-let vocab    = LS.get('ww.vocab', []);       // [{word,meaning,addedAt,source}]
+let vocabBooks = LS.get('ww.vocabBooks', null);
+if(!vocabBooks || typeof vocabBooks!=='object' || Array.isArray(vocabBooks) || !Object.keys(vocabBooks).length){
+  vocabBooks=Object.create(null); vocabBooks['默认']=LS.get('ww.vocab', []);
+  LS.set('ww.vocabBooks',vocabBooks);
+}
+if(Object.getPrototypeOf(vocabBooks)!==null){const safe=Object.create(null);Object.keys(vocabBooks).forEach(n=>safe[n]=vocabBooks[n]);vocabBooks=safe;}
+let activeBook = LS.get('ww.activeBook', Object.keys(vocabBooks)[0]||'默认');
+if(!Object.prototype.hasOwnProperty.call(vocabBooks,activeBook)) activeBook=Object.keys(vocabBooks)[0]||'默认';
+let vocab    = vocabBooks[activeBook] || [];       // 当前词书词条
+function saveVocab(){ vocabBooks[activeBook]=vocab; LS.set('ww.vocabBooks',vocabBooks); LS.set('ww.vocab',vocab); }
+function renderBookSelect(){ const opts=Object.keys(vocabBooks).map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''); ['vocabBook','genVocabBook'].forEach(id=>{const s=$('#'+id);if(s){s.innerHTML=opts;s.value=activeBook;}}); }
+function switchBook(name){ if(!Object.prototype.hasOwnProperty.call(vocabBooks,name)) return; saveVocab(); activeBook=name; vocab=vocabBooks[name]; LS.set('ww.activeBook',activeBook); renderBookSelect(); renderVocab(); updatePathHint(); }
+function ensureBookName(name){ name=String(name||'').trim(); return name && !Object.prototype.hasOwnProperty.call(vocabBooks,name) ? name : ''; }
 let wwDict   = LS.get('ww.dict', {});        // {词: {phon,pos,zh,en}} 跨文章累积
 let cefrSel  = LS.get('ww.level', 'B1');
 let ttsRate  = Number(LS.get('ww.rate', 0.7)) || 0.7;
@@ -664,6 +701,56 @@ function lemmatize(w){
 }
 function shuffle(a){ a=a.slice(); for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
 function isKnown(w){ return lemmaCandidates(w).some(k=>knownSet.has(k)); }
+function articleContainsWord(article, word){
+  const token=String(word||'').trim().toLowerCase(); if(!token) return false;
+  const escaped=escRe(token);
+  const forms=[escaped];
+  if(/[^aeiou]y$/.test(token)) forms.push(escaped.slice(0,-1)+'ies');
+  if(/e$/.test(token)) forms.push(escaped+'d',escaped.slice(0,-1)+'ing');
+  else forms.push(escaped+'s',escaped+'ed',escaped+'ing');
+  if(token.endsWith('f')) forms.push(escaped.slice(0,-1)+'ves');
+  if(token.endsWith('fe')) forms.push(escaped.slice(0,-2)+'ves');
+  return new RegExp('\\b(?:'+forms.join('|')+')\\b','i').test(String(article||''));
+}
+function completedWords(rec){
+  return Array.from(new Set((Array.isArray(rec.words)?rec.words:[]).filter(w=>articleContainsWord(rec.article,w)).map(w=>lemmatize(w))));
+}
+const REVIEW_STEPS_DAYS=[1,3,7,14,30];
+const DAY_MS=24*60*60*1000;
+function reviewInterval(index){ return REVIEW_STEPS_DAYS[Math.min(Math.max(index,0),REVIEW_STEPS_DAYS.length-1)]; }
+function reviewDueAt(rec){
+  if(!rec||!rec.completedAt) return 0;
+  return Number(rec.reviewDueAt)||Number(rec.completedAt)+reviewInterval(Number(rec.reviewStep)||0)*DAY_MS;
+}
+function dueReviews(now=Date.now()){
+  return history.filter(rec=>rec&&rec.completedAt&&reviewDueAt(rec)<=now).sort((a,b)=>reviewDueAt(a)-reviewDueAt(b));
+}
+function completeReading(rec){
+  if(!rec||rec.completedAt) return;
+  const learned=completedWords(rec); rec.completedAt=Date.now(); rec.learnedWords=learned;
+  rec.reviewStep=0; rec.reviewDueAt=rec.completedAt+reviewInterval(0)*DAY_MS; rec.reviewDone=false;
+  const saved=history.find(item=>String(item.id)===String(rec.id));
+  if(saved){ saved.completedAt=rec.completedAt; saved.learnedWords=learned; saved.reviewStep=rec.reviewStep; saved.reviewDueAt=rec.reviewDueAt; saved.reviewDone=false; }
+  current=rec; LS.set('ww.current',rec); LS.set('ww.history',history);
+  learned.forEach(word=>Object.keys(vocabBooks).forEach(book=>vocabBooks[book].forEach(entry=>{
+    if(entry&&entry.word&&lemmaCandidates(entry.word).some(candidate=>candidate===word)) entry.learnedAt=rec.completedAt;
+  })));
+  saveVocab(); renderVocab(); updatePathHint(); render(rec); renderHistory();
+  toast('已完成阅读 · 首次复习 '+new Date(rec.reviewDueAt).toLocaleDateString());
+}
+function recordReview(rec, rating){
+  if(!rec||!rec.completedAt||rec.reviewDone) return;
+  const now=Date.now(), step=Number(rec.reviewStep)||0;
+  const nextStep=rating==='forgot'?0:rating==='fuzzy'?Math.max(0,step-1):Math.min(step+1,REVIEW_STEPS_DAYS.length-1);
+  rec.lastReviewedAt=now; rec.reviewRating=rating; rec.reviewStep=nextStep;
+  rec.reviewDueAt=now+(rating==='forgot'?1:reviewInterval(nextStep))*DAY_MS; rec.reviewDone=true;
+  const saved=history.find(item=>String(item.id)===String(rec.id));
+  if(saved){ saved.lastReviewedAt=now; saved.reviewRating=rating; saved.reviewStep=nextStep; saved.reviewDueAt=rec.reviewDueAt; saved.reviewDone=true; }
+  current=rec; LS.set('ww.current',rec); LS.set('ww.history',history);
+  render(rec); renderHistory(); renderStats();
+  toast('已记录：'+(rating==='remember'?'记得':rating==='fuzzy'?'有点模糊':'忘记了')+' · 下次 '+new Date(rec.reviewDueAt).toLocaleDateString());
+}
+
 async function copyText(txt){
   try{ if(navigator.clipboard&&window.isSecureContext){ await navigator.clipboard.writeText(txt); return true; } }catch(e){}
   try{
@@ -807,7 +894,7 @@ $('#words').addEventListener('input',()=>{ updateWC(); updatePathHint(); });
    实际注入 = round(可用词数 × 比例)，比例 > 0 时至少 1 个
    =================================================================== */
 function vocabPool(){
-  return vocab.filter(v=>!isKnown(v.word)).slice(0,50).map(v=>v.word);   // 生词本最多取 50 个
+  return vocab.filter(v=>v&&!isKnown(v.word)&&!v.learnedAt).map(v=>v.word).filter((w,i,a)=>a.findIndex(x=>x.toLowerCase()===w.toLowerCase())===i);
 }
 function planInjection(pick){
   const ratio=Number($('#ratioRange').value)/100;
@@ -815,7 +902,7 @@ function planInjection(pick){
   const manual=parseWords($('#words').value).filter(w=>!isKnown(w));
   // 1) 生词本有词且比例 > 0：按比例抽词注入
   if(pool.length>0 && ratio>0){
-    let n=Math.round(pool.length*ratio); if(n<1) n=1; if(n>pool.length) n=pool.length;
+    let n=Math.round(pool.length*ratio); if(n<1) n=1; if(n>50) n=50; if(n>pool.length) n=pool.length;
     return {route:'vocab', n, words: pick?shuffle(pool).slice(0,n):[],
       path:`路径：生词本 · 本次注入 ${n} 个生词`};
   }
@@ -1099,6 +1186,19 @@ function render(rec){
     h+='</div></div>';
   }
   const againLabel = words.length ? '用同一批词再写一篇' : '同等级再写一篇';
+  h+='<div class="sec readDoneBar">';
+  if(!rec.completedAt){
+    h+='<button class="ghost" id="btnCompleteReading">完成阅读</button><span class="muted">读完点这里：记录完成时间，本篇实际出现的词标为已学习</span>';
+  }else{
+    h+='<div><b>✓ 阅读记录</b><div class="muted" style="margin-top:5px">'+new Date(rec.completedAt).toLocaleString()+' · 实际出现 '+(rec.learnedWords||[]).length+' 个目标词</div></div>';
+    if(reviewDueAt(rec)>Date.now()){
+      h+='<div><b>下次复习 '+new Date(reviewDueAt(rec)).toLocaleDateString()+'</b><div class="muted" style="margin-top:5px">本轮已记录 · 复习间隔第 '+reviewInterval(Number(rec.reviewStep)||0)+' 天</div></div>';
+    }else{
+      h+='<div><b>今日待复习</b><div class="muted" style="margin-top:5px">回想本篇重点词，再选择记忆情况</div></div>'
+        +'<div class="reviewActions"><button class="sm" data-review="remember">记得</button><button class="sm" data-review="fuzzy">有点模糊</button><button class="sm" data-review="forgot">忘记了</button></div>';
+    }
+  }
+  h+='</div>';
   h+='<div class="sec bar"><button class="ghost" id="btnCopy">复制全文</button>'
     +'<button class="ghost" id="btnMd">导出 Markdown</button>'
     +'<button class="ghost" id="btnAgain">'+againLabel+'</button></div></div>';
@@ -1109,6 +1209,8 @@ function render(rec){
   $('#ttsBar').classList.add('on');
   refreshTts();
 
+  const completeBtn=$('#btnCompleteReading'); if(completeBtn) completeBtn.onclick=()=>completeReading(rec);
+  $$('#out [data-review]').forEach(button=>button.onclick=()=>recordReview(rec,button.dataset.review));
   $$('#out .ttsBtn').forEach(b=>b.onclick=e=>{
     e.stopPropagation();
     const i=Number(b.dataset.i);
@@ -1557,23 +1659,24 @@ $('#btnTtsAll').onclick=()=>{
    =================================================================== */
 function addVocab(word, meaning, source){
   word=String(word||'').trim(); if(!word) return false;
-  if(vocab.some(v=>v.word.toLowerCase()===word.toLowerCase())){ toast('「'+word+'」已在生词本里'); return false; }
+  if(vocab.some(v=>v.word.toLowerCase()===word.toLowerCase())){ toast('「'+word+'」已在本词书里'); return false; }
   vocab.unshift({word, meaning:meaning||'', addedAt:Date.now(), source:source||''});
-  LS.set('ww.vocab',vocab); updatePathHint(); toast('已加入生词本：'+word);
+  saveVocab(); updatePathHint(); toast('已加入「'+activeBook+'」：'+word);
   if($('#paneVocab').classList.contains('on')) renderVocab();
   return true;
 }
 function renderVocab(){
-  $('#vocabCount').textContent='共 '+vocab.length+' 个（生成时最多取最近 50 个）';
+  renderBookSelect();
+  $('#vocabCount').textContent='「'+activeBook+'」共 '+vocab.length+' 个；本词书按比例随机抽取，单篇最多 50 个';
   const box=$('#vocabList');
   if(!vocab.length){ box.innerHTML='<div class="muted" style="font-size:12.5px;padding:10px 2px">生词本是空的。读文章时点任意单词，再点「＋生词本」。</div>'; return; }
   box.innerHTML=vocab.map((v,i)=>
     '<div class="vocabItem"><input type="checkbox" data-i="'+i+'">'
     +'<div class="vMain"><div><span class="vw">'+esc(v.word)+'</span><span class="vm">'+esc(v.meaning||'')+'</span></div>'
-    +'<div class="vs">'+esc(new Date(v.addedAt).toLocaleDateString())+(v.source?' · 来自《'+esc(v.source)+'》':'')+'</div></div>'
+    +'<div class="vs">'+esc(new Date(v.addedAt).toLocaleDateString())+(v.learnedAt?' · 已学习':'')+(v.source?' · 来自《'+esc(v.source)+'》':'')+'</div></div>'
     +'<button class="sm" data-del="'+i+'" aria-label="删除">×</button></div>').join('');
   box.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{
-    vocab.splice(Number(b.dataset.del),1); LS.set('ww.vocab',vocab); renderVocab(); updatePathHint();
+    vocab.splice(Number(b.dataset.del),1); saveVocab(); renderVocab(); updatePathHint();
   });
 }
 $('#btnAddWord').onclick=()=>{
@@ -1589,10 +1692,10 @@ $('#btnVocabSelAll').onclick=()=>{
 $('#btnVocabDelSel').onclick=()=>{
   const sel=new Set($$('#vocabList input[type=checkbox]:checked').map(c=>Number(c.dataset.i)));
   if(!sel.size) return toast('先勾选要删除的词');
-  vocab=vocab.filter((_,i)=>!sel.has(i)); LS.set('ww.vocab',vocab); renderVocab(); updatePathHint();
+  vocab=vocab.filter((_,i)=>!sel.has(i)); saveVocab(); renderVocab(); updatePathHint();
 };
 $('#btnVocabClear').onclick=()=>{
-  if(vocab.length&&confirm('清空整个生词本？')){ vocab=[]; LS.set('ww.vocab',vocab); renderVocab(); updatePathHint(); }
+  if(vocab.length&&confirm('清空当前词书？')){ vocab=[]; saveVocab(); renderVocab(); updatePathHint(); }
 };
 const vocabTxt=()=>vocab.map(v=>v.word+(v.meaning?'\t'+v.meaning:'')).join('\n');
 const csvCell=s=>'"'+String(s??'').replace(/"/g,'""')+'"';
@@ -1600,6 +1703,13 @@ const vocabCsv=()=>'\ufeffword,meaning,addedAt,source\n'+vocab.map(v=>[v.word,v.
 $('#btnVocabTxt').onclick=()=>vocab.length?download(vocabTxt(),'wordweave-vocab.txt'):toast('生词本是空的');
 $('#btnVocabCsv').onclick=()=>vocab.length?download(vocabCsv(),'wordweave-vocab.csv','text/csv;charset=utf-8'):toast('生词本是空的');
 $('#btnVocabCopy').onclick=async()=>vocab.length?toast((await copyText(vocabTxt()))?'已复制':'复制失败'):toast('生词本是空的');
+$('#vocabBook').onchange=e=>switchBook(e.target.value); $('#genVocabBook').onchange=e=>switchBook(e.target.value);
+$('#btnBookNew').onclick=()=>{const n=prompt('新词书名称','新词书'),name=ensureBookName(n);if(!name)return toast('名称为空或已存在');vocabBooks[name]=[];activeBook=name;vocab=vocabBooks[name];saveVocab();LS.set('ww.activeBook',name);renderVocab();updatePathHint();};
+$('#btnBookRename').onclick=()=>{const n=String(prompt('重命名词书',activeBook)||'').trim();if(!n||n===activeBook)return;if(Object.prototype.hasOwnProperty.call(vocabBooks,n))return toast('该名称已存在');vocabBooks[n]=vocab;delete vocabBooks[activeBook];activeBook=n;LS.set('ww.activeBook',n);saveVocab();renderVocab();};
+$('#btnBookDelete').onclick=()=>{if(Object.keys(vocabBooks).length<2)return toast('至少保留一本词书');if(!confirm('删除当前词书？'))return;delete vocabBooks[activeBook];activeBook=Object.keys(vocabBooks)[0];vocab=vocabBooks[activeBook];LS.set('ww.activeBook',activeBook);saveVocab();renderVocab();updatePathHint();};
+function parseCsv(text){const rows=[];let row=[],cell='',quoted=false;for(let i=0;i<text.length;i++){const c=text[i];if(c==='"'){if(quoted&&text[i+1]==='"'){cell+='"';i++;}else quoted=!quoted;}else if(c===','&&!quoted){row.push(cell.trim());cell='';}else if((c==='\n'||c==='\r')&&!quoted){if(c==='\r'&&text[i+1]==='\n')i++;row.push(cell.trim());if(row.some(x=>x))rows.push(row);row=[];cell='';}else cell+=c;}if(quoted) return {rows:[],error:true};row.push(cell.trim());if(row.some(x=>x))rows.push(row);return {rows,error:false};}
+$('#btnVocabImport').onclick=()=>$('#vocabImportFile').click();
+$('#vocabImportFile').onchange=e=>{const f=e.target.files&&e.target.files[0];if(!f)return;const rd=new FileReader();rd.onload=()=>{const text=String(rd.result||'').replace(/^\ufeff/,'');const csv=/\.csv$/i.test(f.name);const parsed=csv?parseCsv(text):{rows:text.split(/\r?\n/).filter(x=>x.trim()).map(x=>x.split(/\t/)),error:false};if(parsed.error){e.target.value='';return toast('CSV 引号格式错误');}const rows=parsed.rows;const start=csv&&/^word$/i.test(rows[0]&&rows[0][0])?1:0;const seen=new Set(vocab.map(v=>v.word.toLowerCase()));const items=rows.slice(start).map(r=>({word:String(r[0]||'').trim(),meaning:String(r[1]||'').trim()})).filter(v=>v.word&&!seen.has(v.word.toLowerCase())).filter((v,i,a)=>a.findIndex(x=>x.word.toLowerCase()===v.word.toLowerCase())===i);if(!items.length){e.target.value='';return toast('没有可导入的新词');}const preview=items.slice(0,12).map(v=>v.word+(v.meaning?'：'+v.meaning:'')).join('\n');if(confirm('导入预览（'+items.length+' 个新词）\n'+preview)){items.forEach(v=>vocab.push({...v,addedAt:Date.now(),source:'导入 '+f.name}));saveVocab();renderVocab();updatePathHint();toast('已导入 '+items.length+' 个词');}e.target.value='';};rd.readAsText(f);};
 
 /* ===================================================================
    统计
@@ -1607,9 +1717,20 @@ $('#btnVocabCopy').onclick=async()=>vocab.length?toast((await copyText(vocabTxt(
 function renderStats(){
   const dist={}; let totalW=0;
   history.forEach(r=>{ const c=r.cefr||'未标注'; dist[c]=(dist[c]||0)+1; totalW+=countWords(r.article); });
+  const due=dueReviews();
   const rows=[['历史文章',history.length],['累计阅读词数',totalW],['生词本',vocab.length],['词典缓存',Object.keys(wwDict).length]];
   Object.keys(dist).sort().forEach(k=>rows.push(['自评 '+k+' 的文章',dist[k]]));
-  $('#statsBox').innerHTML=rows.map(r=>'<div class="statRow"><span>'+esc(r[0])+'</span><span class="statNum">'+esc(r[1])+'</span></div>').join('');
+  const box=$('#statsBox');
+  box.innerHTML='<section class="reviewQueue"><div class="reviewQueueHead"><b>今日待复习</b><span>'+due.length+' 篇</span></div>'
+    +(due.length?'<div id="dueReviews">'+due.map(r=>'<button class="dueReview" data-review-id="'+esc(r.id)+'"><b>'+esc(stripStars(r.title)||'(无标题)')+'</b><span>到期 '+esc(new Date(reviewDueAt(r)).toLocaleDateString())+'</span></button>').join('')+'</div>':'<p class="muted">目前没有到期文章</p>')
+    +'<div class="reviewGuide">复习间隔：第 1、3、7、14、30 天。记得后延长间隔，有点模糊则缩短，忘记了安排 1 天后再复习。</div></section>'
+    +'<div class="statsList">'+rows.map(r=>'<div class="statRow"><span>'+esc(r[0])+'</span><span class="statNum">'+esc(r[1])+'</span></div>').join('')+'</div>';
+  box.querySelectorAll('[data-review-id]').forEach(button=>button.onclick=()=>{
+    const rec=history.find(item=>String(item.id)===button.dataset.reviewId);
+    if(!rec) return; current=rec; LS.set('ww.current',rec); render(rec); updateTokHint();
+    if(mobileMedia.matches) mobileOpenReader();
+    else if(innerWidth<=900) $('#outCard').scrollIntoView({behavior:'smooth',block:'start'});
+  });
 }
 
 /* ===================================================================
@@ -1668,7 +1789,7 @@ async function generate(opt){
     if(!rec.article) throw new Error('模型没有返回正文：'+JSON.stringify(obj).slice(0,300));
     current=rec; LS.set('ww.current',rec);
     render(rec); updateTokHint();
-    history.unshift(rec); history=history.slice(0,40); LS.set('ww.history',history); renderHistory();
+    history.unshift(rec); LS.set('ww.history',history); renderHistory();
     toast('生成完成，用时 '+((Date.now()-t0)/1000).toFixed(1)+'s，正在查词…');
     mobileCloseGenerator();
     if(!mobileOpenReader()&&window.innerWidth<=900) $('#outCard').scrollIntoView({behavior:'smooth',block:'start'});
@@ -1701,7 +1822,7 @@ function renderHistory(){
   box.innerHTML=history.map(r=>{
     const total=countWords(r.article);
     const catLabel=(CATS[r.cat]&&CATS[r.cat].label)||'未分类';
-    const meta=catLabel+' · '+total+' 词'+(r.cefr?' · '+r.cefr:'');
+    const meta=catLabel+' · '+total+' 词'+(r.cefr?' · '+r.cefr:'')+(r.completedAt?' · '+(reviewDueAt(r)<=Date.now()?'待复习':r.reviewDone?'已复习':'已读'):'');
     return '<div class="h" data-id="'+r.id+'"><span class="t">'+esc(stripStars(r.title)||'(无标题)')+'</span>'
       +(r.title_zh?'<span class="sub">'+esc(stripStars(r.title_zh))+'</span>':'')
       +'<span class="d"><span class="dMain">'+esc(meta)+'</span><span class="dDate">'+new Date(r.ts).toLocaleDateString()+'</span></span>'
@@ -1840,7 +1961,7 @@ function backupPayload(){
   return {
     app:'wordweave', version:1, exportedAt:new Date().toISOString(),
     data:{
-      history, vocab, dict:wwDict, current,
+      history, vocab, vocabBooks, activeBook, dict:wwDict, current,
       level:cefrSel, rate:ttsRate, theme, readerSize,
       known:LS.get('ww.known',''),
       cfg:cfgOut
@@ -1886,20 +2007,21 @@ function stageBackup(raw, label){
 function applyBackup(d, mode){
   const s=d.data;
   const inHistory=(Array.isArray(s.history)?s.history:[]).filter(r=>r&&r.id!=null&&r.article);
-  const inVocab=(Array.isArray(s.vocab)?s.vocab:[]).filter(v=>v&&v.word);
+  const importedBooks=s.vocabBooks&&typeof s.vocabBooks==='object'&&!Array.isArray(s.vocabBooks)?s.vocabBooks:null;
+  const legacyVocab=(Array.isArray(s.vocab)?s.vocab:[]).filter(v=>v&&v.word);
+  const inVocab=legacyVocab.filter((v,i,a)=>a.findIndex(x=>String(x.word).toLowerCase()===String(v.word).toLowerCase())===i);
   const inDict=(s.dict&&typeof s.dict==='object')?s.dict:{};
 
   if(mode==='replace'){
-    history=inHistory.slice(); vocab=inVocab.slice();
+    history=inHistory.slice(); vocabBooks=Object.create(null); if(importedBooks) Object.keys(importedBooks).forEach(n=>{vocabBooks[n]=Array.isArray(importedBooks[n])?importedBooks[n].slice():[]}); else vocabBooks['默认']=inVocab.slice(); activeBook=s.activeBook&&vocabBooks[s.activeBook]?s.activeBook:Object.keys(vocabBooks)[0]; vocab=vocabBooks[activeBook]||[];
   }else{
     const ids=new Set(history.map(r=>String(r.id)));
     inHistory.forEach(r=>{ if(!ids.has(String(r.id))) history.push(r); });
-    const have=new Set(vocab.map(v=>String(v.word).toLowerCase()));
-    inVocab.forEach(v=>{ if(!have.has(String(v.word).toLowerCase())) vocab.push(v); });
+    const books=importedBooks||Object.assign(Object.create(null),{默认:inVocab}); Object.keys(books).forEach(n=>{if(!Object.prototype.hasOwnProperty.call(vocabBooks,n))vocabBooks[n]=[];const have=new Set(vocabBooks[n].map(v=>String(v.word).toLowerCase()));books[n].forEach(v=>{const k=String(v.word||'').toLowerCase();if(v.word&&!have.has(k)){vocabBooks[n].push(v);have.add(k);}});}); vocab=vocabBooks[activeBook]||[];
   }
-  history.sort((a,b)=>(b.ts||0)-(a.ts||0)); history=history.slice(0,40);
-  vocab.sort((a,b)=>(b.addedAt||0)-(a.addedAt||0));
-  LS.set('ww.history',history); LS.set('ww.vocab',vocab);
+  history.sort((a,b)=>(b.ts||0)-(a.ts||0));
+  vocab.sort((a,b)=>(b.addedAt||0)-(a.addedAt||0)); Object.keys(vocabBooks).forEach(n=>vocabBooks[n].sort((a,b)=>(b.addedAt||0)-(a.addedAt||0)));
+  LS.set('ww.history',history); saveVocab(); LS.set('ww.activeBook',activeBook);
 
   // 合并时本机词条优先：新设备上后来补的释义（含全部释义、例句）不会被旧备份覆盖
   wwDict = mode==='replace' ? Object.assign({},inDict) : Object.assign({},inDict,wwDict);
